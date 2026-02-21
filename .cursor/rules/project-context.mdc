@@ -1,0 +1,30 @@
+---
+description: Project vision and design context for the circle app
+alwaysApply: true
+---
+
+# Project: Circle
+
+## What We're Building
+
+A fullscreen React app split into 4 quadrants by a cross (two dividing lines meeting at dead centre).
+
+At the centre of the screen sits a **circular path**. 4 words are placed on that circle, evenly spaced (12, 3, 6, 9 o'clock positions), one word per quadrant.
+
+The **entire thing rotates slowly** as one unified object — the cross lines and the 4 words together — spinning from the dead centre point of the screen.
+
+## Key Visual Rules
+
+- Screen always fills the full viewport, divided into 4 equal white quadrants
+- The cross divider lines are a single 1px internal stroke
+- The circular path and 4 words sit exactly at the centre
+- Everything rotates from `transform-origin: center center` of the viewport
+- Words stay on the circle as it spins — they are glued to the circular path
+- Rotation is slow and continuous
+
+## Tech Stack
+
+- React + Vite + TypeScript
+- GSAP for animation (rotating the whole container from centre)
+- Dev server: `npm run dev` on port 5555
+- Python static server: `python3 serve.py` on port 5555
