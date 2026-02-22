@@ -2,6 +2,9 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
 }
 
 html, body, #root {
@@ -11,4 +14,20 @@ html, body, #root {
   position: fixed;
   top: 0;
   left: 0;
+  /* Mobile: remove 300ms tap delay, prevent scroll/zoom from blocking touches */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent tap highlight on images (e.g. language icon) */
+img {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile: use dynamic viewport height so 50% centers correctly (100vh on iOS is often taller than visible area) */
+@media (hover: none) and (pointer: coarse) {
+  html, body, #root {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
 }
