@@ -40,11 +40,26 @@ const OFFSETS_CCW = WORD_ANGLES.map(
 );
 
 // clipPie — coords in 200×200 space, centre always (100,100)
+// Never switches path format — same wedge structure for all spans including near-360°,
+// so backdrop-filter never recomposites on a format change (no snap).
 const clipPie = (startDeg: number, endDeg: number, r: number) => {
   const o = 100;
+  const span = ((endDeg - startDeg) + 360) % 360;
+  if (span < 0.5) return `path('M ${o},${o} Z')`; // zero area — invisible
   const s = polar(startDeg, r);
   const e = polar(endDeg, r);
-  return `path('M ${o},${o} L ${s.x + o},${s.y + o} A ${r},${r} 0 0 1 ${e.x + o},${e.y + o} Z')`;
+  return `path('M ${o},${o} L ${s.x+o},${s.y+o} A ${r},${r} 0 ${span>=180?1:0} 1 ${e.x+o},${e.y+o} Z')`;
+};
+
+// Segment animation constants
+const NEIGHBORS_L  = [3, 0, 1, 2]; // CCW (start-side) neighbour
+const NEIGHBORS_R  = [1, 2, 3, 0]; // CW  (end-side)   neighbour
+const EXPAND_HOVER = 20;            // degrees of hover expansion per side
+
+// Shortest-arc angle lerp — always takes the <180° path so segments shrink monotonically
+const lerpAngle = (a: number, b: number, t: number) => {
+  const diff = ((b - a + 540) % 360) - 180;
+  return a + diff * t;
 };
 
 // ─── Segment data ─────────────────────────────────────────────────────────────
@@ -56,11 +71,17 @@ const SEGMENTS = [
       "There is something deeply artisanal about a well-aged Comté. Each wheel carries the story of its mountain pasture, the wildflowers the cows grazed on, and the hands that turned it in the cave.",
       "A three-year Comté melts on the tongue with a caramel sweetness that no industrial process can replicate. This is cheese as craft — patient, intentional, and quietly extraordinary.",
       "The rind alone tells a story of time. Press your thumb against it and feel decades of tradition compressed into a few centimetres of amber crust.",
+      "There is something deeply artisanal about a well-aged Comté. Each wheel carries the story of its mountain pasture, the wildflowers the cows grazed on, and the hands that turned it in the cave.",
+      "A three-year Comté melts on the tongue with a caramel sweetness that no industrial process can replicate. This is cheese as craft — patient, intentional, and quietly extraordinary.",
+      "The rind alone tells a story of time. Press your thumb against it and feel decades of tradition compressed into a few centimetres of amber crust.",
     ],
   },
   {
     start: 45, end: 135, word: "Retreat",
     body: [
+      "Burrata is an exercise in contrast and restraint. A thin shell of mozzarella holding a soft, surrendering interior of cream and stracciatella — it is designed perfectly.",
+      "Its beauty is its honesty. No ageing, no complexity, just the precise moment of freshness captured and presented without apology.",
+      "Cut it open and everything spills out. It is generous in a way that feels almost reckless. Good design rarely improves on this.",
       "Burrata is an exercise in contrast and restraint. A thin shell of mozzarella holding a soft, surrendering interior of cream and stracciatella — it is designed perfectly.",
       "Its beauty is its honesty. No ageing, no complexity, just the precise moment of freshness captured and presented without apology.",
       "Cut it open and everything spills out. It is generous in a way that feels almost reckless. Good design rarely improves on this.",
@@ -72,11 +93,17 @@ const SEGMENTS = [
       "Parmigiano Reggiano is infrastructure. Built slowly over two years in a wheel that weighs forty kilograms, it is the foundation beneath countless dishes.",
       "Crack it open and the crystalline texture — those white specks of tyrosine — tells you something was constructed here, not just made.",
       "It does not melt graciously. It holds its shape, its identity. It is architecture you can eat, and it outlasts almost everything around it.",
+      "Parmigiano Reggiano is infrastructure. Built slowly over two years in a wheel that weighs forty kilograms, it is the foundation beneath countless dishes.",
+      "Crack it open and the crystalline texture — those white specks of tyrosine — tells you something was constructed here, not just made.",
+      "It does not melt graciously. It holds its shape, its identity. It is architecture you can eat, and it outlasts almost everything around it.",
     ],
   },
   {
     start: 225, end: 315, word: "Listen",
     body: [
+      "Roquefort asks something of you. Veined blue-green through a pale cream interior, it is pungent, mineral, and unapologetically complex.",
+      "To appreciate it you must slow down, let it sit on the back of the tongue, and wait. It rewards patience with a depth that lingers long after the plate is cleared.",
+      "Some cheeses comfort. Some cheeses seduce. Roquefort simply makes you think — about what you are tasting, and why it took you this long to pay attention.",
       "Roquefort asks something of you. Veined blue-green through a pale cream interior, it is pungent, mineral, and unapologetically complex.",
       "To appreciate it you must slow down, let it sit on the back of the tongue, and wait. It rewards patience with a depth that lingers long after the plate is cleared.",
       "Some cheeses comfort. Some cheeses seduce. Roquefort simply makes you think — about what you are tasting, and why it took you this long to pay attention.",
@@ -99,14 +126,18 @@ function App() {
   const closeTimerRef = useRef<number | null>(null);
   const touchYRef = useRef<number | null>(null);
   const dragging = useRef(false);
-  const segRefs = useRef<(HTMLDivElement | null)[]>([]);
-  // Persistent proxy objects — GSAP mutates .t directly, no manual progress sync needed
-  const segProxies = useRef(SEGMENTS.map(() => ({ t: 0 })));
+  const segRefs        = useRef<(HTMLDivElement | null)[]>([]);
+  const segProxies     = useRef(SEGMENTS.map(() => ({ t: 0 })));
+  const fillProxy      = useRef({ t: 0 });
+  const filledSegRef   = useRef<number | null>(null);
+  const fillStartAngles = useRef<{start: number, end: number}[]>(SEGMENTS.map(s => ({ start: s.start, end: s.end })));
+  const fillOpposite   = useRef(0);
   const hoverLeaveTimer = useRef<number | null>(null);
 
   const [hovered, setHovered] = useState<number | null>(null);
   const [displayWord, setDisplayWord] = useState("");
   const [exploded, setExploded] = useState(false);
+  const [circleTextVisible, setCircleTextVisible] = useState(true);
   const [sliderPos, setSliderPos] = useState(0.35);
   const [langOpen, setLangOpen] = useState(false);
   const [selectedLang, setSelectedLang] = useState("EN");
@@ -120,17 +151,29 @@ function App() {
   };
 
   const handleBack = () => {
-    if (langOpen) {
-      setLangOpen(false);
-      return;
-    }
+    if (langOpen) { setLangOpen(false); return; }
     setExploded(false);
-    clearCloseTimer();
-    closeTimerRef.current = window.setTimeout(() => { setHovered(null); resetParagraphScroll(); }, 400);
+    setHovered(null); // Clear immediately so unfill goes to rest in one smooth motion
+    triggerUnfill(() => {
+      setCircleTextVisible(true); // Fade in text after segment is whole again
+      clearCloseTimer();
+      resetParagraphScroll();
+    });
   };
 
   // Mutually exclusive: exploding closes language panel
   useEffect(() => { if (exploded) setLangOpen(false); }, [exploded]);
+
+  // Escape: close language panel or page (exploded view)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (langOpen) { setLangOpen(false); return; }
+      if (exploded) handleBack();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [langOpen, exploded]);
 
   // Click outside language panel closes it — slider is exempt
   useEffect(() => {
@@ -152,7 +195,7 @@ function App() {
   }, [langOpen]);
 
 
-  // Set initial clip paths once on mount — GSAP owns clipPath after this, React must not touch it
+  // Set initial clip paths once on mount
   useEffect(() => {
     SEGMENTS.forEach((seg, i) => {
       const el = segRefs.current[i];
@@ -164,41 +207,105 @@ function App() {
     });
   }, []);
 
-  // Each segment's boundary is shared with its neighbour — expanding one shrinks the other,
-  // so the circle always tiles perfectly with zero overlap and no z-index juggling needed.
-  // CCW neighbour sits at this segment's START boundary; CW neighbour at its END boundary.
-  const NEIGHBORS_L = [3, 0, 1, 2]; // counterclockwise (start-side) neighbour index
-  const NEIGHBORS_R = [1, 2, 3, 0]; // clockwise (end-side) neighbour index
-  const EXPAND = 14;
+  // Shared recompute — two modes:
+  // • Hover mode (ft=0): tiling formula, neighbour boundaries shared so no overlap
+  // • Fill mode (ft>0): every boundary lerps toward the opposite point of the active
+  //   segment — all segments shrink simultaneously, consumed by the expanding one
+  const recompute = () => {
+    const ft = fillProxy.current.t;
+    const fs = filledSegRef.current;
 
-  useEffect(() => {
-    // One shared recompute — reads all 4 proxy values and writes all 4 clip paths
-    const recompute = () => {
-      const t = segProxies.current.map(p => p.t);
-      SEGMENTS.forEach((seg, i) => {
+    if (fs !== null && ft > 0) {
+      const opp = fillOpposite.current;
+      SEGMENTS.forEach((_seg, i) => {
         const el = segRefs.current[i];
         if (!el) return;
-        const startDeg = seg.start - t[i] * EXPAND + t[NEIGHBORS_L[i]] * EXPAND;
-        const endDeg   = seg.end   + t[i] * EXPAND - t[NEIGHBORS_R[i]] * EXPAND;
+        const a = fillStartAngles.current[i];
+        // Active segment spreads just past opposite from each side → span≈360°
+        // Others converge to same point → span→0. Shortest-arc lerp ensures
+        // every non-active segment shrinks monotonically (no backward expansion).
+        const startTarget = i === fs ? opp + 0.01 : opp;
+        const endTarget   = i === fs ? opp - 0.01 : opp;
+        const startDeg = lerpAngle(a.start, startTarget, ft);
+        const endDeg   = lerpAngle(a.end,   endTarget,   ft);
         const clip = clipPie(startDeg, endDeg, CIRCLE_RADIUS);
         el.style.clipPath = clip;
         (el.style as any).WebkitClipPath = clip;
       });
-    };
+    } else {
+      const t = segProxies.current.map(p => p.t);
+      SEGMENTS.forEach((seg, i) => {
+        const el = segRefs.current[i];
+        if (!el) return;
+        const startDeg = seg.start - t[i] * EXPAND_HOVER + t[NEIGHBORS_L[i]] * EXPAND_HOVER;
+        const endDeg   = seg.end   + t[i] * EXPAND_HOVER - t[NEIGHBORS_R[i]] * EXPAND_HOVER;
+        const clip = clipPie(startDeg, endDeg, CIRCLE_RADIUS);
+        el.style.clipPath = clip;
+        (el.style as any).WebkitClipPath = clip;
+      });
+    }
+  };
 
+  // Hover expansion — tiling formula keeps circle gap-free at all times
+  useEffect(() => {
     SEGMENTS.forEach((_seg, i) => {
-      const proxy = segProxies.current[i];
+      const proxy  = segProxies.current[i];
       const target = hovered === i ? 1 : 0;
-      const fromT = proxy.t;
+      const fromT  = proxy.t;
       gsap.killTweensOf(proxy);
       gsap.fromTo(proxy, { t: fromT }, {
-        t: target,
-        duration: 0.5,
-        ease: "power2.inOut",
+        t: target, duration: 0.55, ease: "expo.out",
         onUpdate: recompute,
       });
     });
   }, [hovered]);
+
+  // Fill: clicked segment expands to take over the whole circle.
+  // Capture current boundary angles, then lerp ALL boundaries toward the
+  // opposite point — each segment shrinks proportionally, consumed simultaneously.
+  const triggerFill = (i: number) => {
+    // Freeze hover animations and capture current clip positions
+    SEGMENTS.forEach((_, j) => gsap.killTweensOf(segProxies.current[j]));
+    const t = segProxies.current.map(p => p.t);
+    fillStartAngles.current = SEGMENTS.map((seg, j) => ({
+      start: seg.start - t[j] * EXPAND_HOVER + t[NEIGHBORS_L[j]] * EXPAND_HOVER,
+      end:   seg.end   + t[j] * EXPAND_HOVER - t[NEIGHBORS_R[j]] * EXPAND_HOVER,
+    }));
+    // Opposite point: the far side of the active segment's centre.
+    // For segments that wrap 0° (e.g. 315→45), use arc midpoint, not arithmetic mean.
+    const s = SEGMENTS[i].start;
+    const e = SEGMENTS[i].end;
+    const span = ((e - s + 360) % 360) || 360;
+    const centre = (s + span / 2) % 360;
+    fillOpposite.current = (centre + 180) % 360;
+    filledSegRef.current = i;
+    const from = fillProxy.current.t;
+    gsap.killTweensOf(fillProxy.current);
+    gsap.fromTo(fillProxy.current, { t: from }, {
+      t: 1, duration: 0.7, ease: "power3.inOut",
+      onUpdate: recompute,
+    });
+  };
+
+  const triggerUnfill = (onDone?: () => void) => {
+    // Unfill to REST state (not hover-expanded) for one smooth collapse
+    fillStartAngles.current = SEGMENTS.map((s) => ({ start: s.start, end: s.end }));
+    // Snap segProxies to 0 so when we exit fill mode we show rest, not expanded
+    SEGMENTS.forEach((_, j) => {
+      gsap.killTweensOf(segProxies.current[j]);
+      segProxies.current[j].t = 0;
+    });
+    const from = fillProxy.current.t;
+    gsap.killTweensOf(fillProxy.current);
+    gsap.fromTo(fillProxy.current, { t: from }, {
+      t: 0, duration: 0.5, ease: "power2.inOut",
+      onUpdate: recompute,
+      onComplete: () => {
+        filledSegRef.current = null;
+        onDone?.();
+      },
+    });
+  };
 
   const isInsideParagraph = (target: EventTarget | null) =>
     !!(target instanceof Node && paraRef.current?.contains(target));
@@ -276,13 +383,13 @@ function App() {
         <div ref={paraRef} style={{
           width: "100%", height: "100%",
           paddingTop: "calc(clamp(5rem, 25vw, 42vh) + 8rem)",
-          paddingBottom: "30vh",
+          paddingBottom: "7.5vh",
           overflowY: exploded ? "auto" : "hidden", overflowX: "hidden",
           WebkitOverflowScrolling: "touch", touchAction: "pan-y",
         }}>
           {(SEGMENTS.find(s => s.word === displayWord)?.body ?? []).map((para, i) => (
             <p key={i} style={{
-              fontSize: `${1.0 + sliderPos * 4.0}rem`,
+              fontSize: `${1.0 + sliderPos * 3.0}rem`,
               color: activeSegmentIdx >= 0 ? PARA_COLORS[activeSegmentIdx % 4][i % 6] : "#fff",
               fontFamily: "ui-sans-serif, system-ui, sans-serif",
               fontWeight: "400", lineHeight: "1.8", letterSpacing: "0.02em",
@@ -300,13 +407,13 @@ function App() {
         transform: exploded ? "translate(-50%, 3vh)" : "translate(-50%, calc(50vh - 50%))",
         transition: "transform 1.4s cubic-bezier(0.3, 0, 0.1, 1), opacity 0.5s ease",
         width: "96vw", textAlign: "center",
-        opacity: hovered !== null || exploded ? 1 : 0,
+        opacity: exploded ? 1 : 0,
         pointerEvents: "none",
       }}>
         <span style={{
-          fontSize: "clamp(5rem, 25vw, 42vh)", fontWeight: "700",
+          fontSize: "clamp(4.25rem, 21vw, 36vh)", fontWeight: "700",
           color: exploded ? "rgba(255,255,255,1)" : "rgba(255,255,255,0.1)",
-          transition: "color 0.6s ease", letterSpacing: "0.06em",
+          transition: "color 0.6s ease, font-size 0.4s ease", letterSpacing: "0.06em",
           textTransform: "uppercase", fontFamily: "ui-sans-serif, system-ui, sans-serif",
           display: "block",
         }}>
@@ -321,7 +428,7 @@ function App() {
         transform: circleTransform,
         transition: `transform ${DURATION} ${EASING}`,
         overflow: "visible", display: "flex", alignItems: "center", justifyContent: "center",
-        zIndex: 30, pointerEvents: "none",
+        zIndex: 1, pointerEvents: "none",
       }}>
         {SEGMENTS.map((_seg, i) => {
           const origins = ["50% 0%", "100% 50%", "50% 100%", "0% 50%"];
@@ -339,13 +446,6 @@ function App() {
                 position: "absolute", inset: 0,
                 background: `radial-gradient(ellipse at ${origins[i]}, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.18) 10%, rgba(0,0,0,0.22) 55%, rgba(0,0,0,0.22) 100%)`,
               }} />
-              {/* Hover boost — fades in/out via opacity */}
-              <div style={{
-                position: "absolute", inset: 0,
-                background: `radial-gradient(ellipse at ${origins[i]}, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.18) 10%, rgba(0,0,0,0.22) 55%, rgba(0,0,0,0.22) 100%)`,
-                opacity: hovered === i ? 1 : 0,
-                transition: "opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
-              }} />
             </div>
           );
         })}
@@ -355,7 +455,8 @@ function App() {
         <svg width="200" height="200" viewBox="-100 -100 200 200" style={{
           position: "absolute", left: "50%", top: "50%",
           transform: "translate(-50%, -50%)", zIndex: 20, overflow: "visible", pointerEvents: "none",
-          opacity: exploded ? 0 : 1, transition: "opacity 0.4s ease",
+          opacity: !exploded && circleTextVisible ? 1 : 0,
+          transition: "opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
         }}>
           <defs>
             <path id="main-circle-text-path" d={circlePath} />
@@ -363,10 +464,12 @@ function App() {
           </defs>
           {SEGMENTS.map((seg, i) => {
             const flipped = seg.word === "Enquire";
+            const isHovered = hovered === i;
+            const opacity = hovered === null || isHovered ? 1 : 0;
             return (
               <text key={seg.word} fontSize="11" letterSpacing="3" textAnchor="middle"
                 fill="white" fontFamily="ui-sans-serif, system-ui, sans-serif" fontWeight="500"
-                style={{ userSelect: "none", mixBlendMode: "difference" }}>
+                style={{ userSelect: "none", mixBlendMode: "difference", opacity, transition: "opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1)" }}>
                 <textPath
                   href={flipped ? "#main-circle-text-path-ccw" : "#main-circle-text-path"}
                   startOffset={`${flipped ? OFFSETS_CCW[i] : OFFSETS[i]}%`}>
@@ -385,7 +488,7 @@ function App() {
           position: "fixed", left: "50%", top: "50%",
           transform: circleTransform,
           transition: `transform ${DURATION} ${EASING}`,
-          zIndex: 30,
+          zIndex: 1,
           cursor: exploded ? "default" : "pointer",
           pointerEvents: exploded || langOpen ? "none" : "all",
           touchAction: "manipulation", userSelect: "none",
@@ -411,7 +514,7 @@ function App() {
               if (!exploded) { setHovered(i); setDisplayWord(seg.word); }
             }}
             onClick={() => {
-              if (!exploded) { clearCloseTimer(); resetParagraphScroll(); setExploded(true); setHovered(i); setDisplayWord(seg.word); }
+              if (!exploded) { clearCloseTimer(); resetParagraphScroll(); setExploded(true); setCircleTextVisible(false); setHovered(i); setDisplayWord(seg.word); triggerFill(i); }
             }}
           />
         ))}
@@ -429,7 +532,7 @@ function App() {
         height: `calc(${PANEL_HEIGHT}px + 8vh)`,
         transform: langOpen ? "translateY(0)" : `translateY(${PANEL_HEIGHT}px)`,
         transition: `transform ${DURATION} ${EASING}`,
-        zIndex: 30, pointerEvents: "none",
+        zIndex: 30, pointerEvents: "none", // Keep bar above circle
       }}>
 
         {/* Icon row — sits at the very top of this container */}
